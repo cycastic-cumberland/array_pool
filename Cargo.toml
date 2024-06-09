@@ -2,6 +2,10 @@
 name = "array_pool"
 version = "0.1.0"
 edition = "2021"
+authors = ["Nguyễn Khánh Nam <cycastic@gmail.com>"]
+description = "A simple, tiered caching array pool implementation in Rust."
+license = "MIT"
+license-file = "LICENSE.txt"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
