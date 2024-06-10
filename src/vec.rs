@@ -134,10 +134,20 @@ impl<T: Send + Clone, F: Clone + FnMut() -> T> Clone for PooledVec<T, F>{
 
 impl<T: Send + Display, F: Clone + FnMut() -> T> Display for PooledVec<T, F> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match &self.buffer {
-            Some(v) => write!(f, "{v}"),
-            None => write!(f, "[]")
+        write!(f, "[ ")?;
+
+        let mut insert_colon = false;
+
+        for x in self.iter() {
+            if insert_colon{
+                write!(f, ", ")?;
+            }
+            write!(f, "{x}")?;
+            insert_colon = true;
         }
+
+        write!(f, " ]")?;
+        Ok(())
     }
 }
 

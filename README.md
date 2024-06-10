@@ -24,7 +24,7 @@ fn main(){
     let handle_2 = thread::spawn(move ||{
         // If failed to borrow from any cached chain, create a new array
         // without initializing any value, use with caution
-        let mut slice = unsafe{ cloned_pool_2.rent_or_create_uninitialized(12) }.unwrap();
+        let mut slice = unsafe{ cloned_pool_2.rent_or_create_uninitialized(12, false) }.unwrap();
         slice[12] = 12;
         slice
     });
@@ -54,11 +54,11 @@ fn main(){
     let mut curr = 11usize * 2;
     let mut it = 0usize;
     while let Some(x) = vec2.pop(){
+        println!("{vec2}");
         assert_eq!(curr, x as usize);
         curr = curr.overflowing_sub(2).0;
         it += 1;
     }
-    println!("{vec2}");
     assert_eq!(it, 12);
     assert_eq!(vec2.len(), 0);
 }
