@@ -4,8 +4,10 @@ pub(crate) mod raw_buffer;
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Deref;
+    use std::ops::{Deref};
+    use std::rc::Rc;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use lazy_static::lazy_static;
     use crate::pool::ArrayPool;
@@ -19,8 +21,39 @@ mod tests {
         };
     }
 
+    struct DropTestStruct(Rc<AtomicUsize>);
+
+    impl DropTestStruct {
+        fn new(counter: Rc<AtomicUsize>) -> Self {
+            counter.fetch_add(1, Ordering::Relaxed);
+            Self(counter)
+        }
+    }
+    
+    impl Drop for DropTestStruct {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn drop_test(){
+        let counter_1 = Rc::new(AtomicUsize::default());
+        let counter_2 = Rc::new(AtomicUsize::default());
+        {
+            let mut arr: [DropTestStruct; 1] = [DropTestStruct::new(counter_1.clone())];
+            assert_eq!(counter_1.load(Ordering::Relaxed), 1);
+            assert_eq!(counter_2.load(Ordering::Relaxed), 0);
+            arr[0] = DropTestStruct::new(counter_2.clone());
+            assert_eq!(counter_1.load(Ordering::Relaxed), 0);
+            assert_eq!(counter_2.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(counter_1.load(Ordering::Relaxed), 0);
+        assert_eq!(counter_2.load(Ordering::Relaxed), 0);
+    }
+
     fn simple_pool_test(pool: &ArrayPool<u32>) {
-        let mut borrowed = unsafe { pool.rent_or_create_uninitialized(3).unwrap() };
+        let mut borrowed = unsafe { pool.rent_or_create_uninitialized(3, false).unwrap() };
         borrowed[1] = 1;
         assert_eq!(borrowed[1], 1)
     }
@@ -36,6 +69,7 @@ mod tests {
 
     #[test]
     fn general_test() {
+        let a = 1;
         test_wrapper(&general_test_internal);
     }
 
@@ -54,7 +88,7 @@ mod tests {
         let handle_2 = thread::spawn(move ||{
             // If failed to borrow from any cached chain, create a new array
             // without initializing any value, use with caution
-            let mut slice = unsafe{ cloned_pool_2.rent_or_create_uninitialized(12) }.unwrap();
+            let mut slice = unsafe{ cloned_pool_2.rent_or_create_uninitialized(12, false) }.unwrap();
             slice[12] = 12;
             slice
         });

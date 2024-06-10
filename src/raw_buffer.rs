@@ -1,4 +1,4 @@
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{read, slice_from_raw_parts, slice_from_raw_parts_mut};
@@ -39,7 +39,7 @@ impl<T> RawBuffer<T>{
         }
     }
 
-    pub unsafe fn new(capacity: usize) -> Self {
+    pub unsafe fn new(capacity: usize, zeroed: bool) -> Self {
         if capacity == 0 { return Self::empty() }
         #[cfg(test)]{
             let d = global_allocation(TestFlag::Increment);
@@ -51,12 +51,12 @@ impl<T> RawBuffer<T>{
             initialized: false,
             capacity,
             layout,
-            pointer: alloc(layout) as usize,
+            pointer: { if zeroed { alloc_zeroed(layout) } else { alloc(layout) } } as usize,
         }
     }
 
     pub fn with_fabricator<F: FnMut() -> T>(capacity: usize, f: &mut F) -> Self{
-        let mut ret = unsafe { Self::new(capacity) };
+        let mut ret = unsafe { Self::new(capacity, false) };
         ret.initialize(f);
         ret
     }
@@ -85,7 +85,9 @@ impl<T> RawBuffer<T>{
             let length = self.len();
             let reference = self.get_ref_mut();
             for i in 0..length{
-                reference[i] = fabricator();
+                // Avoid dropping the old, invalid value
+                let ptr = (&mut reference[i]) as *mut T;
+                unsafe { ptr.write(fabricator()) };
             }
 
             self.initialized = true;
@@ -137,9 +139,11 @@ impl<T: Clone> Clone for RawBuffer<T>{
         }
 
         let cap = self.capacity;
-        let mut new_buffer = unsafe { Self::new(cap) };
+        let mut new_buffer = unsafe { Self::new(cap, false) };
         for i in 0..cap {
-            new_buffer[i] = self[i].clone();
+            // Avoid dropping invalid values
+            let ptr = (&mut new_buffer[i]) as *mut T;
+            unsafe { ptr.write(self[i].clone()) };
         }
 
         new_buffer.initialized = true;

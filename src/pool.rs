@@ -120,23 +120,23 @@ impl<T: Send> BufferChain<T>{
         }
     }
 
-    unsafe fn new_uninitialized(&self) -> RawBuffer<T> {
-        let mut ret = RawBuffer::new(self.chunk_size);
+    unsafe fn new_uninitialized(&self, zeroed: bool) -> RawBuffer<T> {
+        let mut ret = RawBuffer::new(self.chunk_size, zeroed);
         ret.set_initialized();
         ret
     }
 
-    pub unsafe fn rent_or_create_uninitialized(self: &Arc<Self>) -> BorrowingSlice<T>{
+    pub unsafe fn rent_or_create_uninitialized(self: &Arc<Self>, zeroed: bool) -> BorrowingSlice<T>{
         let local_chain = self.get_local();
         let array;
         if self.chunk_count.load(Ordering::Acquire) == 0 {
-            array = self.new_uninitialized();
+            array = self.new_uninitialized(zeroed);
         } else if let Some(cached) = local_chain.borrow(){
             array = cached;
         } else if let Some(cached) = self.borrow_from_other_chains() {
             array = cached
         } else {
-            array = self.new_uninitialized();
+            array = self.new_uninitialized(zeroed);
         }
         return BorrowingSlice{
             array,
@@ -250,9 +250,9 @@ impl<T: Send> ArrayPool<T>{
         Err(ArrayPoolError::MaxChunkSizeNotSufficient)
     }
 
-    pub unsafe fn rent_or_create_uninitialized(&self, minimum_capacity: usize) -> Result<BorrowingSlice<T>, ArrayPoolError> {
+    pub unsafe fn rent_or_create_uninitialized(&self, minimum_capacity: usize, zeroed: bool) -> Result<BorrowingSlice<T>, ArrayPoolError> {
         if let Some(chunk_chain) = self.get_chain(minimum_capacity){
-            return Ok(chunk_chain.rent_or_create_uninitialized());
+            return Ok(chunk_chain.rent_or_create_uninitialized(zeroed));
         }
 
         Err(ArrayPoolError::MaxChunkSizeNotSufficient)
