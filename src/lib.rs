@@ -12,8 +12,6 @@ mod tests {
     use lazy_static::lazy_static;
     use crate::pool::ArrayPool;
     use crate::vec::PooledVec;
-    // use crate::raw_buffer::{TestFlag};
-    // use super::*;
 
     lazy_static!{
         static ref POOL: Arc<ArrayPool<u32>> = {
@@ -63,14 +61,9 @@ mod tests {
         simple_pool_test(pool);
     }
 
-    fn test_wrapper<F: Fn() -> ()>(f: &F) {
-        f();
-    }
-
     #[test]
     fn general_test() {
-        let a = 1;
-        test_wrapper(&general_test_internal);
+        general_test_internal();
     }
 
     fn threading_test_internal(){
@@ -102,12 +95,12 @@ mod tests {
 
     #[test]
     fn threading_test() {
-        test_wrapper(&threading_test_internal)
+        threading_test_internal()
     }
 
     fn test_vec_internal(){
         let pool = POOL.deref();
-        let mut vec: PooledVec<u32> = PooledVec::new_with_pool(pool.clone());
+        let mut vec: PooledVec<u32> = PooledVec::create(pool.clone());
         assert_eq!(vec.len(), 0);
         for x in 0..12{
             vec.push(x * 2);
@@ -120,13 +113,18 @@ mod tests {
             curr = curr.overflowing_sub(2).0;
             it += 1;
         }
-        // println!("{vec2}");
+
         assert_eq!(it, 12);
         assert_eq!(vec2.len(), 0);
+        assert_eq!(vec.len(), 12);
+        assert_eq!(vec.pop(), Some(22));
+        assert_eq!(vec.len(), 11);
+        assert_eq!(vec.clear(), 11);
+        assert_eq!(vec.len(), 0);
     }
 
     #[test]
     fn test_vec(){
-        test_wrapper(&test_vec_internal)
+        test_vec_internal()
     }
 }
