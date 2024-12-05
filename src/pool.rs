@@ -26,7 +26,7 @@ struct BufferChain<T: Send>{
 pub struct BorrowingSlice<T: Send>{
     array: RawBuffer<T>,
     chain: Arc<BufferChain<T>>,
-    initialized: bool,
+    pub(crate) initialized: bool,
 }
 
 impl<T> Drop for LocalBufferChain<T>{
@@ -69,8 +69,7 @@ impl<T: Send> BufferChain<T>{
             let reference = buffer.get_ref_mut();
             for i in 0..length{
                 // Avoid dropping the old, invalid value
-                let ptr = (&mut reference[i]) as *mut T;
-                unsafe { ptr.write(fabricator()) };
+                std::ptr::write(&mut reference[i], fabricator());
             }
 
             buffer
@@ -219,8 +218,7 @@ impl<T: Send + Clone> Clone for BorrowingSlice<T> {
             };
             for i in 0..self.len(){
                 // ptr contain uninitialized value
-                let ptr = (&mut new_buffer[i]) as *mut T;
-                ptr.write(self[i].clone());
+                std::ptr::write(&mut new_buffer[i], self[i].clone());
             }
         }
 
@@ -290,27 +288,38 @@ impl<T: Send> ArrayPool<T>{
         Err(ArrayPoolError::MaxChunkSizeNotSufficient)
     }
 
-    pub fn expand_buffer<F: FnMut() -> T>(&self, mut old_buffer: BorrowingSlice<T>, fabricator: &mut F) -> Result<BorrowingSlice<T>, ArrayPoolError> {
+    pub unsafe fn rent_or_create_minimum_uninitialized(&self, zeroed: bool) -> Result<BorrowingSlice<T>, ArrayPoolError> {
+        for (_, chunk_chain) in &self.chunk_map {
+            return Ok(chunk_chain.rent_or_create_uninitialized(zeroed));
+        }
+
+        Err(ArrayPoolError::MaxChunkSizeNotSufficient)
+    }
+
+    pub unsafe  fn expand_buffer(&self, mut old_buffer: BorrowingSlice<T>) -> Result<BorrowingSlice<T>, ArrayPoolError> {
         let old_size = old_buffer.len();
         let new_size = old_size * 2;
-        if let Ok(mut new_buffer) = self.rent_with(new_size, fabricator){
+        if let Ok(mut new_buffer) = unsafe {self.rent_or_create_uninitialized(new_size, false)} {
             for i in 0..old_size {
                 swap(&mut old_buffer[i], &mut new_buffer[i]);
             }
 
+            old_buffer.initialized = false;
             drop(old_buffer);
             Ok(new_buffer)
         } else { Err(ArrayPoolError::MaxChunkSizeNotSufficient) }
     }
 
-    pub fn shrink_buffer<F: FnMut() -> T>(&self, mut old_buffer: BorrowingSlice<T>, fabricator: &mut F) -> BorrowingSlice<T> {
+    pub unsafe fn shrink_buffer(&self, mut old_buffer: BorrowingSlice<T>) -> BorrowingSlice<T> {
         let old_size = old_buffer.len();
         let new_size = old_size / 2;
 
-        if let Ok(mut new_buffer) = self.rent_with(new_size, fabricator){
+        if let Ok(mut new_buffer) = unsafe {self.rent_or_create_uninitialized(new_size, false)} {
             for i in 0..new_size {
                 swap(&mut old_buffer[i], &mut new_buffer[i]);
             }
+
+            old_buffer.initialized = false;
             drop(old_buffer);
             new_buffer
         } else {
@@ -342,9 +351,5 @@ impl<T: Default + Send> ArrayPool<T>{
 
     pub fn rent_minimum(&self) -> Result<BorrowingSlice<T>, ArrayPoolError>{
         self.rent_minimum_with(&mut T::default)
-    }
-
-    pub fn replace(&self, old_buffer: BorrowingSlice<T>) -> Result<BorrowingSlice<T>, ArrayPoolError>{
-        self.expand_buffer(old_buffer, &mut T::default)
     }
 }

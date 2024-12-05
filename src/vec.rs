@@ -1,23 +1,22 @@
 use std::fmt::{Display, Formatter};
 use std::mem::swap;
 use std::ops::{Deref, DerefMut};
+use std::ptr::drop_in_place;
 use std::sync::Arc;
 use crate::pool::{ArrayPool, BorrowingSlice};
 
-pub struct PooledVec<T: Send, F: Clone + FnMut() -> T = fn() -> T> {
+pub struct PooledVec<T: Send> {
     empty_buffer: [T; 0],
     pool: Arc<ArrayPool<T>>,
-    fabricator: F,
     buffer: Option<BorrowingSlice<T>>,
     length: usize
 }
 
-impl<T: Send, F: Clone + FnMut() -> T> PooledVec<T, F> {
-    pub fn create(pool: Arc<ArrayPool<T>>, fabricator: F) -> Self {
+impl<T: Send> PooledVec<T> {
+    pub fn create(pool: Arc<ArrayPool<T>>) -> Self {
         Self{
             empty_buffer: [],
             pool,
-            fabricator,
             buffer: None,
             length: 0,
         }
@@ -27,10 +26,12 @@ impl<T: Send, F: Clone + FnMut() -> T> PooledVec<T, F> {
         let index = self.length;
         let buffer_size = buffer.len();
         if index >= buffer_size {
-            buffer = self.pool.expand_buffer(buffer, &mut self.fabricator)
-                .expect("Could not request buffer");
+            unsafe {
+                buffer = self.pool.expand_buffer(buffer)
+                    .expect("Could not request buffer");
+            }
         }
-        buffer[index] = value;
+        unsafe { std::ptr::write(&mut buffer[index], value); }
         self.buffer = Some(buffer);
         self.length += 1;
     }
@@ -40,7 +41,7 @@ impl<T: Send, F: Clone + FnMut() -> T> PooledVec<T, F> {
         swap(&mut curr, &mut self.buffer);
         if let Some(buffer) = curr {
             self.push_with_buffer(buffer, value);
-        } else if let Ok(buffer) = self.pool.rent_minimum_with(&mut self.fabricator) {
+        } else if let Ok(buffer) = unsafe { self.pool.rent_or_create_minimum_uninitialized(false) } {
             self.push_with_buffer(buffer, value);
         } else {
             panic!("Could not borrow a buffer from given array pool");
@@ -61,7 +62,7 @@ impl<T: Send, F: Clone + FnMut() -> T> PooledVec<T, F> {
         let len = self.length;
         let cap = buffer.len();
         if self.pool.min_size() < cap && len * 2 < cap {
-            buffer = self.pool.shrink_buffer(buffer, &mut self.fabricator);
+            unsafe { buffer = self.pool.shrink_buffer(buffer); }
         }
         self.buffer = Some(buffer);
     }
@@ -71,10 +72,8 @@ impl<T: Send, F: Clone + FnMut() -> T> PooledVec<T, F> {
         swap(&mut curr, &mut self.buffer);
         if let Some(mut buffer) = curr {
             if self.length == 0 { return None; }
-            let fab = &mut self.fabricator;
-            let mut return_value = fab();
             self.length -= 1;
-            swap(&mut return_value, &mut buffer[self.length]);
+            let return_value = unsafe { std::ptr::read(&mut buffer[self.length]) };
             self.try_shrink(buffer);
             Some(return_value)
         } else { None }
@@ -83,9 +82,16 @@ impl<T: Send, F: Clone + FnMut() -> T> PooledVec<T, F> {
     pub fn clear(&mut self) -> usize {
         let mut curr: Option<BorrowingSlice<T>> = None;
         swap(&mut curr, &mut self.buffer);
-        if let Some(buffer) = curr{
-            drop(buffer);
-            self.length
+        if let Some(mut buffer) = curr{
+            unsafe {
+                for i in 0..self.len(){
+                    drop_in_place(&mut buffer[i])
+                }
+                drop(buffer);
+                let old_length = self.length;
+                self.length = 0;
+                old_length
+            }
         } else { 0 }
     }
 
@@ -100,7 +106,7 @@ impl<T: Send, F: Clone + FnMut() -> T> PooledVec<T, F> {
     }
 }
 
-impl<T: Send, F: Clone + FnMut() -> T> Deref for PooledVec<T, F>{
+impl<T: Send> Deref for PooledVec<T>{
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
@@ -111,7 +117,7 @@ impl<T: Send, F: Clone + FnMut() -> T> Deref for PooledVec<T, F>{
     }
 }
 
-impl<T: Send, F: Clone + FnMut() -> T> DerefMut for PooledVec<T, F>{
+impl<T: Send> DerefMut for PooledVec<T>{
     fn deref_mut(&mut self) -> &mut Self::Target {
         match &mut self.buffer {
             Some(r) => &mut r.deref_mut()[0..self.length],
@@ -120,19 +126,18 @@ impl<T: Send, F: Clone + FnMut() -> T> DerefMut for PooledVec<T, F>{
     }
 }
 
-impl<T: Send + Clone, F: Clone + FnMut() -> T> Clone for PooledVec<T, F>{
+impl<T: Send + Clone> Clone for PooledVec<T>{
     fn clone(&self) -> Self {
         Self{
             empty_buffer: [],
             pool: self.pool.clone(),
-            fabricator: self.fabricator.clone(),
             buffer: self.buffer.clone(),
             length: self.length,
         }
     }
 }
 
-impl<T: Send + Display, F: Clone + FnMut() -> T> Display for PooledVec<T, F> {
+impl<T: Send + Display> Display for PooledVec<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "[ ")?;
 
@@ -148,11 +153,5 @@ impl<T: Send + Display, F: Clone + FnMut() -> T> Display for PooledVec<T, F> {
 
         write!(f, " ]")?;
         Ok(())
-    }
-}
-
-impl<T: Send + Default> PooledVec<T, fn() -> T> {
-    pub fn new_with_pool(pool: Arc<ArrayPool<T>>) -> Self {
-        Self::create(pool, T::default)
     }
 }

@@ -1,13 +1,7 @@
 use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::ptr::{read, slice_from_raw_parts, slice_from_raw_parts_mut};
-
-#[cfg(test)] #[derive(Copy, Clone)] pub(crate) enum TestFlag {
-    Increment,
-    Decrement,
-    Fetch
-}
+use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 
 pub struct RawBuffer<T>{
     phantom_of_the_opera: PhantomData<T>,
