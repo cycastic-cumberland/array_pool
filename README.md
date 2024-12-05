@@ -45,7 +45,7 @@ use array_pool::{vec::PooledVec, pool::ArrayPool};
 
 fn main(){
     let pool: Arc<ArrayPool<u32>> = Arc::new(ArrayPool::new());
-    let mut vec: PooledVec<u32> = PooledVec::new_with_pool(pool);
+    let mut vec: PooledVec<u32> = PooledVec::create(pool);
     assert_eq!(vec.len(), 0);
     for x in 0..12{
         vec.push(x * 2);
