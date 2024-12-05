@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::mem::{size_of, swap};
 use std::ops::{Deref, DerefMut};
+use std::ptr::drop_in_place;
 use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -24,7 +25,8 @@ struct BufferChain<T: Send>{
 
 pub struct BorrowingSlice<T: Send>{
     array: RawBuffer<T>,
-    chain: Arc<BufferChain<T>>
+    chain: Arc<BufferChain<T>>,
+    initialized: bool,
 }
 
 impl<T> Drop for LocalBufferChain<T>{
@@ -36,7 +38,7 @@ impl<T> Drop for LocalBufferChain<T>{
 }
 
 impl<T> LocalBufferChain<T>{
-    pub fn borrow(self: &Arc<Self>) -> Option<RawBuffer<T>>{
+    pub unsafe fn borrow(self: &Arc<Self>) -> Option<RawBuffer<T>>{
         let mut lock_guard = self.chunk_linked_list.lock().unwrap();
         if let Some(slice) = lock_guard.pop() {
             self.chunk_count.fetch_sub(1, Ordering::SeqCst);
@@ -61,7 +63,18 @@ impl<T: Send> BufferChain<T>{
     }
 
     fn new_array<F: FnMut() -> T>(&self, fabricator: &mut F) -> RawBuffer<T> {
-        RawBuffer::with_fabricator(self.chunk_size, fabricator)
+        unsafe {
+            let mut buffer = RawBuffer::<T>::new(self.chunk_size, false);
+            let length = buffer.len();
+            let reference = buffer.get_ref_mut();
+            for i in 0..length{
+                // Avoid dropping the old, invalid value
+                let ptr = (&mut reference[i]) as *mut T;
+                unsafe { ptr.write(fabricator()) };
+            }
+
+            buffer
+        }
     }
 
     fn get_local(&self) -> &Arc<LocalBufferChain<T>> {
@@ -86,7 +99,7 @@ impl<T: Send> BufferChain<T>{
 
         for (id, chain_weak) in lock_guard.iter() {
             if let Some(chain) = chain_weak.upgrade() {
-                if let Some(cached) = chain.borrow(){
+                if let Some(cached) = unsafe{ chain.borrow() }{
                     found = Some(cached);
                     break;
                 }
@@ -107,23 +120,22 @@ impl<T: Send> BufferChain<T>{
         let array;
         if self.chunk_count.load(Ordering::Acquire) == 0 {
             array = self.new_array(fabricator);
-        } else if let Some(cached) = local_chain.borrow(){
+        } else if let Some(cached) = unsafe{ local_chain.borrow() }{
             array = cached;
         } else if let Some(cached) = self.borrow_from_other_chains() {
             array = cached
         } else {
             array = self.new_array(fabricator);
         }
-        return BorrowingSlice{
+        BorrowingSlice{
             array,
             chain: self.clone(),
+            initialized: true,
         }
     }
 
-    unsafe fn new_uninitialized(&self, zeroed: bool) -> RawBuffer<T> {
-        let mut ret = RawBuffer::new(self.chunk_size, zeroed);
-        ret.set_initialized();
-        ret
+    pub(crate) unsafe fn new_uninitialized(&self, zeroed: bool) -> RawBuffer<T> {
+        RawBuffer::new(self.chunk_size, zeroed)
     }
 
     pub unsafe fn rent_or_create_uninitialized(self: &Arc<Self>, zeroed: bool) -> BorrowingSlice<T>{
@@ -138,9 +150,10 @@ impl<T: Send> BufferChain<T>{
         } else {
             array = self.new_uninitialized(zeroed);
         }
-        return BorrowingSlice{
+        BorrowingSlice{
             array,
             chain: self.clone(),
+            initialized: false,
         }
     }
 }
@@ -148,6 +161,14 @@ impl<T: Send> BufferChain<T>{
 impl<T: Send> Drop for BorrowingSlice<T>{
     fn drop(&mut self) {
         if self.array.is_empty() { return; }
+        if self.initialized {
+            unsafe {
+                for i in 0..self.len() {
+                    let elem = &mut self[i];
+                    drop_in_place(elem);
+                }
+            }
+        }
         let mut lock_guard = self.chain.get_local().chunk_linked_list.lock().unwrap();
         let mut store = RawBuffer::<T>::empty();
         swap(&mut store, &mut self.array);
@@ -190,21 +211,24 @@ impl<T: Send + Display> Display for BorrowingSlice<T> {
 
 impl<T: Send + Clone> Clone for BorrowingSlice<T> {
     fn clone(&self) -> Self {
-        let new_buffer = match self.chain.get_local().borrow(){
-            Some(mut v) => {
-                for i in 0..self.len(){
-                    v[i] = self[i].clone();
-                }
-
-                v
-            },
-            None => self.array.clone()
-        };
+        let mut new_buffer: RawBuffer<T>;
+        unsafe {
+            new_buffer = match self.chain.get_local().borrow(){
+                Some(v) => v,
+                None => self.chain.new_uninitialized(false)
+            };
+            for i in 0..self.len(){
+                // ptr contain uninitialized value
+                let ptr = (&mut new_buffer[i]) as *mut T;
+                ptr.write(self[i].clone());
+            }
+        }
 
 
         Self{
             array: new_buffer,
             chain: self.chain.clone(),
+            initialized: true,
         }
     }
 }
@@ -298,6 +322,7 @@ impl<T: Send> ArrayPool<T>{
         BorrowingSlice{
             array: RawBuffer::empty(),
             chain: self.empty_chain.clone(),
+            initialized: true,
         }
     }
 
