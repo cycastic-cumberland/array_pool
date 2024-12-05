@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::mem::{size_of, swap};
+use std::mem::swap;
 use std::ops::{Deref, DerefMut};
 use std::ptr::drop_in_place;
-use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::thread::ThreadId;
 
-use thread_local::ThreadLocal;
 use crate::raw_buffer::RawBuffer;
+use thread_local::ThreadLocal;
 
 struct LocalBufferChain<T> {
     chunk_linked_list: Mutex<Vec<RawBuffer<T>>>,
@@ -23,6 +23,7 @@ struct BufferChain<T: Send>{
     local_chain: ThreadLocal<Arc<LocalBufferChain<T>>>
 }
 
+/// Represent a borrowed array.
 pub struct BorrowingSlice<T: Send>{
     array: RawBuffer<T>,
     chain: Arc<BufferChain<T>>,
@@ -47,12 +48,14 @@ impl<T> LocalBufferChain<T>{
     }
 }
 
+/// Provides a resource pool that enables reusing instances of type `T`.
 pub struct ArrayPool<T: Send> {
     empty_chain: Arc<BufferChain<T>>,
     chunk_map: BTreeMap<usize, Arc<BufferChain<T>>>
 }
 
 impl<T: Send> BufferChain<T>{
+    /// Create a new buffer chain with specified power.
     pub fn new(size_power: u8) -> Arc<Self> {
         Arc::new(Self {
             chunk_size: 1usize << size_power,
@@ -114,6 +117,10 @@ impl<T: Send> BufferChain<T>{
         found
     }
 
+    /// Rent a new array.
+    ///
+    /// If none is available for renting, create a new one with each element
+    /// initialized by `fabricator`.
     pub fn rent_with<F: FnMut() -> T>(self: &Arc<Self>, fabricator: &mut F) -> BorrowingSlice<T> {
         let local_chain = self.get_local();
         let array;
@@ -133,10 +140,15 @@ impl<T: Send> BufferChain<T>{
         }
     }
 
+    /// Create a new uninitialized array. Zero the array if needed.
     pub(crate) unsafe fn new_uninitialized(&self, zeroed: bool) -> RawBuffer<T> {
         RawBuffer::new(self.chunk_size, zeroed)
     }
 
+    /// Rent a new array.
+    ///
+    /// If none is available for renting, create a new one without initialize it,
+    /// zero if needed.
     pub unsafe fn rent_or_create_uninitialized(self: &Arc<Self>, zeroed: bool) -> BorrowingSlice<T>{
         let local_chain = self.get_local();
         let array;
@@ -238,6 +250,10 @@ pub enum ArrayPoolError {
 }
 
 impl<T: Send> ArrayPool<T>{
+    /// Create a new `ArrayPool` with `max_power`.
+    ///
+    /// `max_power` determine how many size variants does a pool have.
+    /// A `max_power` of x will create arrays with length 2^n (3 <= n < x).
     pub fn with_max_power(max_power: u8) -> Result<Self, ArrayPoolError> {
         let mut map: BTreeMap<usize, Arc<BufferChain<T>>> = BTreeMap::new();
         if max_power < 4 { return Err(ArrayPoolError::MaxPowerTooSmall); }
@@ -250,8 +266,15 @@ impl<T: Send> ArrayPool<T>{
         })
     }
 
+    /// Create a new `ArrayPool` with `max_power` of `target_pointer_width - 1`.
     pub fn new() -> Self {
-        Self::with_max_power((size_of::<usize>() - 1) as u8).unwrap()
+        #[cfg(target_pointer_width = "64")]{
+            return Self::with_max_power(63).unwrap();
+        }
+
+        #[cfg(target_pointer_width = "32")]{
+            return Self::with_max_power(31).unwrap();
+        }
     }
 
     fn get_chain(&self, minimum_capacity: usize) -> Option<&Arc<BufferChain<T>>>{
@@ -264,6 +287,10 @@ impl<T: Send> ArrayPool<T>{
         None
     }
 
+    /// Rent a new array with `minimum_capacity`.
+    ///
+    /// If no cached array was found, create a new one with each element
+    /// initialized by `fabricator`.
     pub fn rent_with<F: FnMut() -> T>(&self, minimum_capacity: usize, fabricator: &mut F) -> Result<BorrowingSlice<T>, ArrayPoolError> {
         if let Some(chunk_chain) = self.get_chain(minimum_capacity){
             return Ok(chunk_chain.rent_with(fabricator));
@@ -272,6 +299,10 @@ impl<T: Send> ArrayPool<T>{
         Err(ArrayPoolError::MaxChunkSizeNotSufficient)
     }
 
+    /// Rent a new array with `minimum_capacity`.
+    ///
+    /// If no cached array was found, create a new one without initializing it,
+    /// zero if needed.
     pub unsafe fn rent_or_create_uninitialized(&self, minimum_capacity: usize, zeroed: bool) -> Result<BorrowingSlice<T>, ArrayPoolError> {
         if let Some(chunk_chain) = self.get_chain(minimum_capacity){
             return Ok(chunk_chain.rent_or_create_uninitialized(zeroed));
@@ -280,6 +311,10 @@ impl<T: Send> ArrayPool<T>{
         Err(ArrayPoolError::MaxChunkSizeNotSufficient)
     }
 
+    /// Rent an array with the smallest supported capacity.
+    ///
+    /// If no cached array was found, create a new one with each element
+    /// initialized by `fabricator`.
     pub fn rent_minimum_with<F: FnMut() -> T>(&self, fabricator: &mut F) -> Result<BorrowingSlice<T>, ArrayPoolError>{
         for (_, chunk_chain) in &self.chunk_map {
             return Ok(chunk_chain.rent_with(fabricator));
@@ -288,6 +323,10 @@ impl<T: Send> ArrayPool<T>{
         Err(ArrayPoolError::MaxChunkSizeNotSufficient)
     }
 
+    /// Rent an array with the smallest supported capacity.
+    ///
+    /// If no cached array was found, create a new one without initializing it,
+    /// zero if needed.
     pub unsafe fn rent_or_create_minimum_uninitialized(&self, zeroed: bool) -> Result<BorrowingSlice<T>, ArrayPoolError> {
         for (_, chunk_chain) in &self.chunk_map {
             return Ok(chunk_chain.rent_or_create_uninitialized(zeroed));
@@ -296,7 +335,8 @@ impl<T: Send> ArrayPool<T>{
         Err(ArrayPoolError::MaxChunkSizeNotSufficient)
     }
 
-    pub unsafe  fn expand_buffer(&self, mut old_buffer: BorrowingSlice<T>) -> Result<BorrowingSlice<T>, ArrayPoolError> {
+    /// Double the capacity of `old_buffer`. New slots won't be initialized.
+    pub unsafe fn expand_buffer(&self, mut old_buffer: BorrowingSlice<T>) -> Result<BorrowingSlice<T>, ArrayPoolError> {
         let old_size = old_buffer.len();
         let new_size = old_size * 2;
         if let Ok(mut new_buffer) = unsafe {self.rent_or_create_uninitialized(new_size, false)} {
@@ -310,6 +350,7 @@ impl<T: Send> ArrayPool<T>{
         } else { Err(ArrayPoolError::MaxChunkSizeNotSufficient) }
     }
 
+    /// Halve the capacity of `old_buffer`. Old slots won't be dropped.
     pub unsafe fn shrink_buffer(&self, mut old_buffer: BorrowingSlice<T>) -> BorrowingSlice<T> {
         let old_size = old_buffer.len();
         let new_size = old_size / 2;
@@ -327,6 +368,7 @@ impl<T: Send> ArrayPool<T>{
         }
     }
 
+    /// Rent an empty array.
     pub fn rent_empty(&self) -> BorrowingSlice<T> {
         BorrowingSlice{
             array: RawBuffer::empty(),
@@ -335,20 +377,30 @@ impl<T: Send> ArrayPool<T>{
         }
     }
 
+    /// Gets the smallest supported capacity.
     pub fn min_size(&self) -> usize {
         *self.chunk_map.first_key_value().unwrap().0
     }
 
+    /// Gets the largest supported capacity.
     pub fn max_size(&self) -> usize {
         *self.chunk_map.last_key_value().unwrap().0
     }
 }
 
 impl<T: Default + Send> ArrayPool<T>{
+    /// Rent a new array with `minimum_capacity`.
+    ///
+    /// If no cached array was found, create a new one with each element
+    /// initialized by the default constructor.
     pub fn rent(&self, minimum_capacity: usize) -> Result<BorrowingSlice<T>, ArrayPoolError> {
         self.rent_with(minimum_capacity, &mut T::default)
     }
 
+    /// Rent an array with the smallest supported capacity.
+    ///
+    /// If no cached array was found, create a new one with each element
+    /// initialized by the default constructor.
     pub fn rent_minimum(&self) -> Result<BorrowingSlice<T>, ArrayPoolError>{
         self.rent_minimum_with(&mut T::default)
     }

@@ -5,6 +5,7 @@ use std::ptr::drop_in_place;
 use std::sync::Arc;
 use crate::pool::{ArrayPool, BorrowingSlice};
 
+/// A vector implementation that uses pooled arrays.
 pub struct PooledVec<T: Send> {
     empty_buffer: [T; 0],
     pool: Arc<ArrayPool<T>>,
@@ -13,6 +14,7 @@ pub struct PooledVec<T: Send> {
 }
 
 impl<T: Send> PooledVec<T> {
+    /// Create a new vector.
     pub fn create(pool: Arc<ArrayPool<T>>) -> Self {
         Self{
             empty_buffer: [],
@@ -36,6 +38,7 @@ impl<T: Send> PooledVec<T> {
         self.length += 1;
     }
 
+    /// Push a new element. Expand the internal buffer if needed.
     pub fn push(&mut self, value: T) {
         let mut curr: Option<BorrowingSlice<T>> = None;
         swap(&mut curr, &mut self.buffer);
@@ -48,10 +51,12 @@ impl<T: Send> PooledVec<T> {
         }
     }
 
+    /// Get the length of this vector.
     pub fn len(&self) -> usize {
         self.length
     }
 
+    /// Get the capacity of this vector.
     pub fn capacity(&self) -> usize {
         if let Some(buffer) = &self.buffer{
             buffer.len()
@@ -67,6 +72,8 @@ impl<T: Send> PooledVec<T> {
         self.buffer = Some(buffer);
     }
 
+    /// Pop the last element from this vector and return it.
+    /// Shrink the buffer if needed.
     pub fn pop(&mut self) -> Option<T> {
         let mut curr: Option<BorrowingSlice<T>> = None;
         swap(&mut curr, &mut self.buffer);
@@ -79,6 +86,7 @@ impl<T: Send> PooledVec<T> {
         } else { None }
     }
 
+    /// Clear all elements in this vector and return its last length.
     pub fn clear(&mut self) -> usize {
         let mut curr: Option<BorrowingSlice<T>> = None;
         swap(&mut curr, &mut self.buffer);
@@ -95,11 +103,15 @@ impl<T: Send> PooledVec<T> {
         } else { 0 }
     }
 
+    /// Gets a reference to an element at a specific index,
+    /// may return `None` if index is out of bound.
     pub fn at(&self, index: usize) -> Option<&T> {
         if index >= self.length { return None; }
         Some(&self[index])
     }
 
+    /// Gets a mutable reference to an element at a specific index,
+    /// may return `None` if index is out of bound.
     pub fn at_mut(&mut self, index: usize) -> Option<&mut T> {
         if index >= self.length { return None; }
         Some(&mut self[index])
